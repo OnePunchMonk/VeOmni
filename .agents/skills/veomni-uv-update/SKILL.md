@@ -7,18 +7,42 @@ description: "Use this skill when updating dependencies managed by uv: bumping a
 
 Read `.agents/knowledge/uv.md` for the full dependency architecture. The key things that make VeOmni's uv setup non-trivial:
 
-- uv version is pinned in **three places** (must update together)
+- `[tool.uv].required-version` is a **range**; the concrete uv pins live
+  elsewhere and must stay inside it
+- most Dockerfiles are **generated** from `docker/matrix.yaml` — never
+  hand-edit them
 - torch uses **direct wheel URLs** (not just version bumps)
 - only three extras: `gpu` / `npu` / `npu_aarch64`, mutually exclusive,
   each a complete superset
 
+`pyproject.toml` is the source of truth for every version claim below. Read the
+relevant block before editing — this file describes *where* things live, not
+which versions are current.
+
 ## Scenario 1: Update uv Version
 
-uv is pinned to a specific version. Update **all three locations** together:
+`pyproject.toml` -> `[tool.uv]` -> `required-version` is a **range**
+(e.g. `">=0.9.8,<0.13"`). Docker and CI install a **concrete** pin and run with
+`--locked` / `--frozen`. Every concrete pin must stay inside the range.
 
-1. `pyproject.toml` -> `[tool.uv]` -> `required-version = "==X.Y.Z"`
-2. `docker/cuda/Dockerfile.cu130` -> `COPY --from=ghcr.io/astral-sh/uv:X.Y.Z`
-3. `docker/ascend/Dockerfile.ascend_*` -> same pattern (if present)
+1. `docker/matrix.yaml` -> `defaults.uv_version` — the single source for all
+   generated Dockerfiles. Then regenerate:
+
+   ```bash
+   pip install jinja2 pyyaml   # generate.py deps, not project deps
+   python docker/generate.py
+   ```
+
+   CI enforces the regen with `python docker/generate.py --check`
+   (`.github/workflows/check_docker_generate.yml`), so commit `matrix.yaml`
+   **and** the regenerated `docker/{cuda,ascend}/Dockerfile.*` together.
+   The pip-based `Dockerfile.ascend_*_a2.arm` / `*_a3` variants are
+   hand-maintained and outside the matrix — check whether they pin uv too.
+2. `.github/workflows/check_patchgen.yml` -> `astral-sh/setup-uv` `version:`.
+   This job runs outside the container image, so an unpinned uv would float
+   above the range ceiling.
+3. `pyproject.toml` -> `required-version` — only widen/move the range when the
+   new pin falls outside it.
 
 Then regenerate the lockfile:
 
@@ -50,7 +74,9 @@ This is the most complex update. torch versions are pinned in **multiple places*
 - `pyproject.toml` -> `[project.optional-dependencies]` -> `gpu` list
 - `pyproject.toml` -> `[tool.uv]` -> `override-dependencies` (the `extra == 'gpu'` entries)
 - `pyproject.toml` -> `[tool.uv.sources]` -> `torch` (direct wheel URL — must update to matching wheel)
-- Related packages: `torchvision`, `torchaudio`, `torchcodec`, `nvidia-cusparselt-cu13`, `nvidia-nccl-cu13`, `nvidia-cutlass-dsl`
+- Related packages that must move together: `torchvision`, `torchaudio`,
+  `torchcodec`, plus the `nvidia-*` runtime pins in the `gpu` extra. Grep the
+  `gpu` block rather than trusting this list — it grows.
 
 **For NPU (`npu` / `npu_aarch64` extras):**
 - Same pattern but with `+cpu` suffix or no suffix
@@ -58,9 +84,25 @@ This is the most complex update. torch versions are pinned in **multiple places*
 **Steps:**
 1. Identify the target torch version and matching wheel URLs from https://download.pytorch.org/whl/
 2. Update all pinned versions in `pyproject.toml` (extras, overrides, sources)
-3. Check FA / FlashQLA wheel/source compatibility:
-   - `flash-attn` (cp311 + cp312) and `flash-attn-3` are pinned to Luosuu prebuilt wheel URLs in `[tool.uv.sources]` (cu130/torch2.11/cxx11abi=true). Bumping torch / Python / cuda requires a matching Luosuu release — see https://github.com/Luosuu/flash-attention3-wheels/releases.
-   - `flash-attn-4` and `flash-qla` source-build from git pins; torch ABI bumps may need bumping the git revs. `flash-qla`'s `[[tool.uv.dependency-metadata]]` block mirrors its install_requires (`tilelang==0.1.8`, `apache-tvm-ffi==0.1.9`); refresh the pins if upstream bumps them.
+3. Check attention-kernel compatibility. Three groups behave differently —
+   confirm each against `[tool.uv.sources]` before editing:
+   - **Prebuilt wheel URLs** (`flash-attn` cp311/cp312 x86_64-only,
+     `flash-attn-3` abi3, `flash-mla`): pinned to torch+CUDA+ABI-specific
+     wheels. A torch / Python / CUDA bump requires a matching upstream release
+     — see https://github.com/Luosuu/flash-attention3-wheels/releases.
+   - **PyPI releases** (`flash-attn-4`, `flash-qla`): plain version pins in the
+     `gpu` extra. `flash-qla` is a pure-Python wheel whose static metadata
+     already matches the `tilelang` / `apache-tvm-ffi` pins, so it needs no
+     source build and no `dependency-metadata` override. `tilelang` is pinned
+     in `override-dependencies` because `tile-kernels` and `flash-qla` must
+     agree on one version — bump them as a set.
+   - **Source-built git pins** (`magi-attention`, `create-block-mask-cuda`,
+     `flash-attn-cute`, `magi-to-hstu-cuda`): each needs a
+     `[[tool.uv.dependency-metadata]]` block (upstream declares no usable
+     metadata) plus `extra-build-dependencies` / `extra-build-variables`
+     entries. A torch ABI bump may require bumping the git revs. These are
+     SM90+ only and the GPU CI job installs them with `--no-install-package`
+     exclusions on the SM89 L20 runners.
 4. Update `torchcodec` version if needed (compatibility note in pyproject.toml)
 5. Regenerate lockfile:
 
@@ -70,7 +112,9 @@ uv sync --extra gpu --dev
 ```
 
 6. Run tests: `pytest tests/`
-7. Update Docker images if torch version changed
+7. If the torch version changed, update `docker/matrix.yaml` and re-run
+   `python docker/generate.py` (see Scenario 1) — never hand-edit the generated
+   Dockerfiles.
 
 ## Scenario 4: Update transformers Version
 
@@ -110,9 +154,10 @@ If `uv lock` fails due to version conflicts, check:
 
 ## Common Pitfalls
 
-- **Forgetting to update Docker**: uv version and torch version changes must be reflected in `docker/` Dockerfiles, otherwise CI builds will fail.
+- **Hand-editing generated Dockerfiles**: `docker/{cuda,ascend}/Dockerfile.*` are rendered from `docker/templates/*.j2` + `docker/matrix.yaml`. Edit the matrix and re-run `python docker/generate.py`; `check_docker_generate.yml` fails the PR otherwise. Exception: the pip-based `*_a2.arm` / `*_a3` ascend variants are hand-maintained.
 - **Partial torch updates**: updating `torch` but not `torchvision`/`torchaudio`/`torchcodec` to matching versions causes import errors.
 - **flash-attn wheel mismatch**: flash-attn wheels are built for specific torch+CUDA combinations. A torch version bump requires finding or building new wheels.
 - **Committing only pyproject.toml**: always commit `uv.lock` together. Docker builds use `--locked` which requires the lockfile to match.
 - **override-dependencies markers**: the `extra == 'gpu'` markers in overrides are critical. Removing them causes uv to download wrong torch variants from PyPI.
-- **no-build-isolation**: `flash-attn` and `flash-attn-3` are listed under `no-build-isolation-package`. They require torch to be installed first. If sync fails, try `uv sync` without these extras first, then add them.
+- **Assuming build isolation is disabled**: there is no `no-build-isolation-package` block any more. Source builds instead get their toolchain from `[tool.uv.extra-build-dependencies]` (uv venvs are not seeded), and `torch` is passed with `match-runtime = true` where the extension links against it. If a source build fails on a missing `setuptools`/`torch`, add it there rather than reaching for `--no-build-isolation`.
+- **Overlay reinstall**: an exact `uv sync` removes the MagiAttention SM90 CUTLASS overlay installed by `scripts/kernel/install_magi_sm90.sh`. Reinstall it afterwards (see constraints, "Environment Reproducibility").
