@@ -11,9 +11,22 @@ CI install a concrete pin and use `--locked` / `--frozen` for reproducibility.
 | Location | Format |
 |----------|--------|
 | `pyproject.toml` -> `[tool.uv]` -> `required-version` | range |
-| `docker/matrix.yaml` -> `defaults.uv_version` | concrete pin; renders into `docker/{cuda,ascend}/Dockerfile.*` via `docker/generate.py` (CI: `--check`) |
-| `docker/ascend/Dockerfile.ascend_*_a2.arm`, `*_a3` | hand-maintained pip-based variants, outside the matrix |
+| `docker/matrix.yaml` -> `defaults.uv_version` | concrete pin; renders into the **three** matrix outputs via `docker/generate.py` (CI: `--check`) |
+| hand-maintained Dockerfiles | every other file under `docker/` carries its own pin, if any |
 | `.github/workflows/check_patchgen.yml` | `setup-uv` `version: "X.Y.Z"` |
+
+Only three Dockerfiles are generated (`docker/matrix.yaml` `output:` keys):
+`docker/cuda/Dockerfile.cu130`, `docker/ascend/Dockerfile.ascend_8.3.rc2_a2.x86`
+and `docker/ascend/Dockerfile.ascend_9.0.0_a2.x86`. The other six ascend
+variants (`*_a2.arm`, `*_a3`, the three `*torch_npu2.10.0.post2*`) and
+`docker/rocm/Dockerfile.ROCm7.14` are hand-maintained, and at least
+`Dockerfile.ascend_9.0.0_torch_npu2.10.0.post2_910b.x86` hardcodes its own uv
+version. Never assume the matrix covers a Dockerfile — enumerate:
+
+```bash
+grep -rn "astral-sh/uv" docker/     # every uv pin, generated or not
+grep -rn "torch==" docker/          # same for torch
+```
 
 ## Dependency Layout
 
@@ -107,14 +120,16 @@ Two pyproject knobs make the remaining git source builds succeed:
 1. **`[[tool.uv.dependency-metadata]]`** — these projects ship no usable
    metadata, so without a static `requires-dist` uv runs their `setup.py` on a
    fresh venv and crashes with `ModuleNotFoundError: No module named
-   'setuptools'`. MagiAttention additionally keeps its real requirements in a
-   separate file that targets CUDA 12 NVSHMEM, so VeOmni declares an empty
-   `requires-dist` and supplies the CUDA 13 closure through the `gpu` extra.
+   'setuptools'`. All four blocks declare `requires-dist = []`: the three
+   companion extensions have no upstream runtime requirements, while
+   MagiAttention's are omitted from its metadata and kept in a separate CUDA 12
+   NVSHMEM requirements file. The CUDA 13 closure is supplied through the `gpu`
+   extra instead.
 2. **`[tool.uv.extra-build-dependencies]`** seeds `setuptools / wheel /
    packaging / ninja` (+ `torch`, with `match-runtime = true` where the
    extension links against it) — uv venvs are not seeded.
-   `[tool.uv.extra-build-variables]` carries their `MAX_JOBS` /
-   compute-capability build flags.
+   `[tool.uv.extra-build-variables]` carries `MAX_JOBS` / compute-capability
+   flags for the three that need them (not `flash-attn-cute`).
 
 `FLASH_ATTENTION_FORCE_BUILD=TRUE` and `[tool.uv.no-build-isolation-package]`
 are gone — no FA setup.py runs anywhere now (FA2/3/MLA are wheels, FA4 and

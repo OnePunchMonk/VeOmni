@@ -50,9 +50,11 @@ veomni/
 │   ├── dispatch.py     OpSlot placeholders declared in patchgen-generated
 │   │                   modeling; bound by _bind_veomni_ops() in models/auto.py
 │   ├── config/         Legacy per-model / global dispatch, still live
-│   │   ├── registry.py OpSpec/BackendSpec/OpScope + apply_global_ops() and
-│   │   │               apply_per_model_patches(), used by the remaining
-│   │   │               device_patch.py models (wan, deepseek_v3)
+│   │   ├── registry.py OpSpec/BackendSpec/OpScope. apply_global_ops() resolves
+│   │   │               OpScope.GLOBAL ops for every run (called from
+│   │   │               apply_ops_config); apply_per_model_patches() resolves
+│   │   │               OpScope.PER_MODEL ops and is called only from the
+│   │   │               device_patch.py of wan and deepseek_v3
 │   │   └── singleton.py  get_ops_config()/set_ops_config() for patch files
 │   ├── kernels/        Kernel implementations (one subdir per op)
 │   │   ├── deepseek_sparse_attention/  DSA indexer/top-k selection
@@ -68,6 +70,7 @@ veomni/
 │   │   └── moe/        Fused MoE kernels + group_gemm sub-kernels
 │   ├── platform/       Platform-specific runtime patches
 │   │   └── npu/        HCCL pre-mul sum patch
+│   ├── liger/          Liger kernel adapters
 │   └── batch_invariant_ops/  Mode switch for deterministic ops
 ├── lora/               LoRA / PEFT injection: linear + MoE-expert adapters,
 │                       DCP + HF-adapter save/load, target mapping
@@ -189,8 +192,9 @@ tests/
 ├── utils/          Utility function tests
 ├── e2e/            End-to-end training tests (require GPU)
 ├── special_sanity/ Standalone sanity scripts (e.g. device API usage check)
+├── testdata/       Fixture assets used by tests
 ├── toy_config/     Minimal model configs for fast testing
-├── train_scripts/  Shell entry points used by e2e tests
+├── train_scripts/  Python training entry scripts launched by tests/e2e/utils.py
 └── tools/          Test utilities (launch_utils, common_utils)
 ```
 
@@ -213,9 +217,10 @@ Distributed tests (`tests/parallel/`, `tests/e2e/`) may require multiple GPUs an
 
 **A passing local run does not mean CI runs it.**
 `.github/workflows/gpu_unit_tests.yml` and `npu_unit_tests.yml` enumerate most
-test files one by one; only `tests/data` and `tests/ops` run as whole
-directories. A new file anywhere else is invisible to CI until it is added to
-those workflows (usually both).
+test files one by one. Only `tests/data` runs as a whole directory in both
+workflows; `tests/ops` runs wholesale on GPU only (the NPU job enumerates three
+named ops files). A new file anywhere else is invisible to CI until it is added
+to those workflows, usually both.
 
 ## Key Entry Points
 

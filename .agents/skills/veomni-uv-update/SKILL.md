@@ -25,8 +25,11 @@ which versions are current.
 (e.g. `">=0.9.8,<0.13"`). Docker and CI install a **concrete** pin and run with
 `--locked` / `--frozen`. Every concrete pin must stay inside the range.
 
-1. `docker/matrix.yaml` -> `defaults.uv_version` — the single source for all
-   generated Dockerfiles. Then regenerate:
+1. `docker/matrix.yaml` -> `defaults.uv_version` — the source for the **three**
+   generated Dockerfiles (`docker/matrix.yaml`'s `output:` keys:
+   `docker/cuda/Dockerfile.cu130`,
+   `docker/ascend/Dockerfile.ascend_8.3.rc2_a2.x86`,
+   `docker/ascend/Dockerfile.ascend_9.0.0_a2.x86`). Then regenerate:
 
    ```bash
    pip install jinja2 pyyaml   # generate.py deps, not project deps
@@ -36,12 +39,20 @@ which versions are current.
    CI enforces the regen with `python docker/generate.py --check`
    (`.github/workflows/check_docker_generate.yml`), so commit `matrix.yaml`
    **and** the regenerated `docker/{cuda,ascend}/Dockerfile.*` together.
-   The pip-based `Dockerfile.ascend_*_a2.arm` / `*_a3` variants are
-   hand-maintained and outside the matrix — check whether they pin uv too.
-2. `.github/workflows/check_patchgen.yml` -> `astral-sh/setup-uv` `version:`.
+2. **Every other Dockerfile is hand-maintained** — the six remaining ascend
+   variants and `docker/rocm/Dockerfile.ROCm7.14`. Some carry their own uv pin
+   (`Dockerfile.ascend_9.0.0_torch_npu2.10.0.post2_910b.x86` does today), so
+   enumerate rather than assume:
+
+   ```bash
+   grep -rn "astral-sh/uv" docker/
+   ```
+
+   Update the ones that appear and are not one of the three generated outputs.
+3. `.github/workflows/check_patchgen.yml` -> `astral-sh/setup-uv` `version:`.
    This job runs outside the container image, so an unpinned uv would float
    above the range ceiling.
-3. `pyproject.toml` -> `required-version` — only widen/move the range when the
+4. `pyproject.toml` -> `required-version` — only widen/move the range when the
    new pin falls outside it.
 
 Then regenerate the lockfile:
@@ -99,8 +110,10 @@ This is the most complex update. torch versions are pinned in **multiple places*
    - **Source-built git pins** (`magi-attention`, `create-block-mask-cuda`,
      `flash-attn-cute`, `magi-to-hstu-cuda`): each needs a
      `[[tool.uv.dependency-metadata]]` block (upstream declares no usable
-     metadata) plus `extra-build-dependencies` / `extra-build-variables`
-     entries. A torch ABI bump may require bumping the git revs. These are
+     metadata) plus an `extra-build-dependencies` entry, and an
+     `extra-build-variables` entry where the build needs `MAX_JOBS` /
+     compute-capability flags (all but `flash-attn-cute` today).
+     A torch ABI bump may require bumping the git revs. These are
      SM90+ only and the GPU CI job installs them with `--no-install-package`
      exclusions on the SM89 L20 runners.
 4. Update `torchcodec` version if needed (compatibility note in pyproject.toml)
@@ -113,8 +126,13 @@ uv sync --extra gpu --dev
 
 6. Run tests: `pytest tests/`
 7. If the torch version changed, update `docker/matrix.yaml` and re-run
-   `python docker/generate.py` (see Scenario 1) — never hand-edit the generated
-   Dockerfiles.
+   `python docker/generate.py` (see Scenario 1) — never hand-edit the three
+   generated Dockerfiles. Then check the hand-maintained ones, which pin torch
+   independently (`docker/rocm/Dockerfile.ROCm7.14` pins a ROCm torch build):
+
+   ```bash
+   grep -rn "torch==" docker/
+   ```
 
 ## Scenario 4: Update transformers Version
 
